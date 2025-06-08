@@ -6,15 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	pkgError "github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/error"
 	"github.com/sirupsen/logrus"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
-// forwardToWebhook is a helper function to forward event to webhook url
 func forwardToWebhook(ctx context.Context, evt *events.Message) error {
 	logrus.Info("Forwarding event to webhook:", config.WhatsappWebhook)
 	payload, err := createPayload(ctx, evt)
@@ -23,7 +25,7 @@ func forwardToWebhook(ctx context.Context, evt *events.Message) error {
 	}
 
 	for _, url := range config.WhatsappWebhook {
-		if err = submitWebhook(payload, url); err != nil {
+		if err = SubmitWebhook(payload, url); err != nil {
 			return err
 		}
 	}
@@ -40,13 +42,18 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	body := make(map[string]interface{})
 
 	if from := evt.Info.SourceString(); from != "" {
-		body["from"] = from
+		body["SenderNumber"] = from
 	}
 	if message.ID != "" {
-		body["message"] = message
+		body["message"] = map[string]interface{}{
+			"ID":            message.ID,
+			"TextMessage":   message.Text,
+			"RepliedId":     message.RepliedId,
+			"QuotedMessage": message.QuotedMessage,
+		}
 	}
 	if pushname := evt.Info.PushName; pushname != "" {
-		body["pushname"] = pushname
+		body["PushName"] = pushname
 	}
 	if waReaction.Message != "" {
 		body["reaction"] = waReaction
@@ -61,66 +68,82 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 		body["timestamp"] = timestamp
 	}
 
+	jid, err := types.ParseJID(evt.Info.Chat.String())
+	if err != nil {
+		return nil, pkgError.WebhookError(fmt.Sprintf("Invalid JID: %v", err))
+	}
+	IsGroup := strings.Contains(evt.Info.Chat.String(), "@g.us")
+	body["IsGroup"] = IsGroup
+	if IsGroup {
+		GroupName, err := GetGroupName(ctx, jid)
+		if err != nil {
+			logrus.Errorf("Failed to get group name: %v", err)
+		} else if GroupName != "" {
+			body["GroupName"] = GroupName
+		}
+	}
+
+	// Verifica se a mensagem é do próprio número
+	waCli := GetWaCli()
+	MyNumber := false
+	if waCli != nil && waCli.Store.ID != nil {
+		MyNumber = extractPhoneNumber(evt.Info.SourceString()) == extractPhoneNumber(waCli.Store.ID.String())
+	}
+	body["MyNumber"] = MyNumber
+
+	body["Type"] = determineMessageType(evt, message.Text)
+
 	if audioMedia := evt.Message.GetAudioMessage(); audioMedia != nil {
 		path, err := ExtractMedia(ctx, config.PathMedia, audioMedia)
 		if err != nil {
-			logrus.Errorf("Failed to download audio from %s: %v", evt.Info.SourceString(), err)
+			logrus.Errorf("Failed to download audio: %v", err)
 			return nil, pkgError.WebhookError(fmt.Sprintf("Failed to download audio: %v", err))
 		}
 		body["audio"] = path
 	}
-
 	if contactMessage := evt.Message.GetContactMessage(); contactMessage != nil {
 		body["contact"] = contactMessage
 	}
-
-	if documentMedia := evt.Message.GetDocumentMessage(); documentMedia != nil {
-		path, err := ExtractMedia(ctx, config.PathMedia, documentMedia)
+	if documentMessage := evt.Message.GetDocumentMessage(); documentMessage != nil {
+		path, err := ExtractMedia(ctx, config.PathMedia, documentMessage)
 		if err != nil {
-			logrus.Errorf("Failed to download document from %s: %v", evt.Info.SourceString(), err)
+			logrus.Errorf("Failed to download document: %v", err)
 			return nil, pkgError.WebhookError(fmt.Sprintf("Failed to download document: %v", err))
 		}
 		body["document"] = path
 	}
-
 	if imageMedia := evt.Message.GetImageMessage(); imageMedia != nil {
 		path, err := ExtractMedia(ctx, config.PathMedia, imageMedia)
 		if err != nil {
-			logrus.Errorf("Failed to download image from %s: %v", evt.Info.SourceString(), err)
+			logrus.Errorf("Failed to download image: %v", err)
 			return nil, pkgError.WebhookError(fmt.Sprintf("Failed to download image: %v", err))
 		}
 		body["image"] = path
 	}
-
 	if listMessage := evt.Message.GetListMessage(); listMessage != nil {
 		body["list"] = listMessage
 	}
-
 	if liveLocationMessage := evt.Message.GetLiveLocationMessage(); liveLocationMessage != nil {
 		body["live_location"] = liveLocationMessage
 	}
-
 	if locationMessage := evt.Message.GetLocationMessage(); locationMessage != nil {
 		body["location"] = locationMessage
 	}
-
 	if orderMessage := evt.Message.GetOrderMessage(); orderMessage != nil {
 		body["order"] = orderMessage
 	}
-
 	if stickerMedia := evt.Message.GetStickerMessage(); stickerMedia != nil {
 		path, err := ExtractMedia(ctx, config.PathMedia, stickerMedia)
 		if err != nil {
-			logrus.Errorf("Failed to download sticker from %s: %v", evt.Info.SourceString(), err)
+			logrus.Errorf("Failed to download sticker: %v", err)
 			return nil, pkgError.WebhookError(fmt.Sprintf("Failed to download sticker: %v", err))
 		}
 		body["sticker"] = path
 	}
-
 	if videoMedia := evt.Message.GetVideoMessage(); videoMedia != nil {
 		path, err := ExtractMedia(ctx, config.PathMedia, videoMedia)
 		if err != nil {
-			logrus.Errorf("Failed to download video from %s: %v", evt.Info.SourceString(), err)
+			logrus.Errorf("Failed to download video: %v", err)
 			return nil, pkgError.WebhookError(fmt.Sprintf("Failed to download video: %v", err))
 		}
 		body["video"] = path
@@ -129,7 +152,60 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	return body, nil
 }
 
-func submitWebhook(payload map[string]interface{}, url string) error {
+func determineMessageType(evt *events.Message, text string) string {
+	if evt.Message.GetAudioMessage() != nil {
+		if evt.Message.GetAudioMessage().GetPTT() {
+			return "voice_message"
+		}
+		return "audio"
+	}
+	if evt.Message.GetImageMessage() != nil {
+		return "image"
+	}
+	if evt.Message.GetVideoMessage() != nil {
+		return "video"
+	}
+	if evt.Message.GetDocumentMessage() != nil {
+		return "document"
+	}
+	if evt.Message.GetStickerMessage() != nil {
+		return "sticker"
+	}
+	if evt.Message.GetContactMessage() != nil {
+		return "contact"
+	}
+	if evt.Message.GetLocationMessage() != nil {
+		return "location"
+	}
+	if evt.Message.GetLiveLocationMessage() != nil {
+		return "live_location"
+	}
+	if evt.Message.GetListMessage() != nil {
+		return "list"
+	}
+	if evt.Message.GetOrderMessage() != nil {
+		return "order"
+	}
+	if evt.Message.GetPaymentInviteMessage() != nil {
+		return "payment"
+	}
+	if evt.Message.GetPollCreationMessageV3() != nil || evt.Message.GetPollCreationMessageV4() != nil || evt.Message.GetPollCreationMessageV5() != nil {
+		return "poll"
+	}
+	if evt.Message.GetReactionMessage() != nil {
+		return "reaction"
+	}
+	if evt.Message.GetConversation() != "" || evt.Message.GetExtendedTextMessage() != nil {
+		urlRegex := regexp.MustCompile(`https?://[^\s]+`)
+		if urlRegex.MatchString(text) {
+			return "link"
+		}
+		return "text"
+	}
+	return "unknown"
+}
+
+func SubmitWebhook(payload map[string]interface{}, url string) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	postBody, err := json.Marshal(payload)
@@ -139,13 +215,13 @@ func submitWebhook(payload map[string]interface{}, url string) error {
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(postBody))
 	if err != nil {
-		return pkgError.WebhookError(fmt.Sprintf("error when create http object %v", err))
+		return pkgError.WebhookError(fmt.Sprintf("Error when creating HTTP request: %v", err))
 	}
 
 	secretKey := []byte(config.WhatsappWebhookSecret)
 	signature, err := getMessageDigestOrSignature(postBody, secretKey)
 	if err != nil {
-		return pkgError.WebhookError(fmt.Sprintf("error when create signature %v", err))
+		return pkgError.WebhookError(fmt.Sprintf("Error when creating signature: %v", err))
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -165,5 +241,5 @@ func submitWebhook(payload map[string]interface{}, url string) error {
 		sleepDuration *= 2
 	}
 
-	return pkgError.WebhookError(fmt.Sprintf("error when submit webhook after %d attempts: %v", attempt, err))
+	return pkgError.WebhookError(fmt.Sprintf("Failed after %d attempts: %v", attempt, err))
 }
