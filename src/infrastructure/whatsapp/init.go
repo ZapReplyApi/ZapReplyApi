@@ -424,10 +424,10 @@ func handleCallOffer(ctx context.Context, evt *events.CallOffer) {
 	if len(config.WhatsappWebhook) > 0 {
 		go func() {
 			payload := map[string]interface{}{
-				"from":      evt.From.String(),
-				"call_id":   evt.CallID,
-				"type":      "call_received",
-				"status":    "received",
+				"SenderNumber":      evt.From.String(),
+				"Call_Id":   evt.CallID,
+				"Type":      "call_received",
+				"Status_Call":    "received",
 				"timestamp": evt.Timestamp.Format(time.RFC3339),
 				"IsGroup":   false,
 			}
