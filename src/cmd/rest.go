@@ -216,9 +216,9 @@ func restServer(_ *cobra.Command, _ []string) {
 			go func() {
 				payload := map[string]interface{}{
 					"SenderNumber": request.Phone,
-					"call_id":      request.CallID,
+					"Call_Id":      request.CallID,
 					"Type":         "call_received",
-					"status":       "rejected",
+					"Status_Call":       "rejected",
 					"timestamp":    time.Now().Format(time.RFC3339),
 					"IsGroup":      false,
 				}
@@ -553,6 +553,110 @@ func restServer(_ *cobra.Command, _ []string) {
 		logrus.Infof("Location message sent successfully to %s", jid.String())
 
 		return c.JSON(fiber.Map{"status": "Location sent"})
+	})
+
+	// Endpoint: Deletar Mensagem (sem agendamento)
+	app.Post("/chat/delete-message", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone     string `json:"Phone"`
+			MessageID string `json:"message_id"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.MessageID == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and message_id are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		messageID := types.MessageID(request.MessageID)
+		_, err = waCli.RevokeMessage(jid, messageID)
+		if err != nil {
+			logrus.Errorf("Failed to revoke message %s in chat %s: %v", messageID, jid.String(), err)
+			// Verifica se o erro é devido ao tempo limite do WhatsApp
+			if strings.Contains(err.Error(), "too old") || strings.Contains(err.Error(), "not allowed") {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Message deletion not allowed: likely too old or not sent by you"})
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to revoke message: %v", err)})
+		}
+		logrus.Infof("Message %s revoked successfully in chat %s", messageID, jid.String())
+
+		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s deleted", messageID)})
+	})
+
+	// Endpoint: Marcar Mensagem como Lida (corrigido e com depuração)
+	app.Post("/chat/mark-read", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone     string `json:"Phone"`
+			MessageID string `json:"message_id"`
+			Sender    string `json:"sender"` // Obrigatório para grupos
+			Played    bool   `json:"played"` // true para marcar como reproduzida (voz)
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.MessageID == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and message_id are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		chatJID, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		var senderJID types.JID
+		if request.Sender != "" {
+			senderJID, err = whatsapp.ParseJID(request.Sender)
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid sender JID: %v", err)})
+			}
+		} else if strings.Contains(chatJID.String(), "@g.us") {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Sender is required for group chats"})
+		}
+
+		messageID := types.MessageID(request.MessageID)
+		timestamp := time.Now()
+
+		var receiptTypeExtra []types.ReceiptType
+		if request.Played {
+			receiptTypeExtra = append(receiptTypeExtra, types.ReceiptTypePlayed)
+		} else {
+			receiptTypeExtra = append(receiptTypeExtra, types.ReceiptTypeRead)
+		}
+
+		logrus.Debugf("Marking message %s as read in chat %s with sender %s, played: %v", messageID, chatJID.String(), senderJID.String(), request.Played)
+		err = waCli.MarkRead([]types.MessageID{messageID}, timestamp, chatJID, senderJID, receiptTypeExtra...)
+		if err != nil {
+			logrus.Errorf("Failed to mark message %s as read in chat %s: %v", messageID, chatJID.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to mark message as read: %v", err)})
+		}
+		logrus.Infof("Message %s marked as read in chat %s", messageID, chatJID.String())
+
+		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s marked as read", messageID)})
 	})
 
 	rest.InitRestApp(app, appUsecase)
