@@ -49,7 +49,7 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 			"ID":            message.ID,
 			"TextMessage":   message.Text,
 			"RepliedId":     message.RepliedId,
-			"QuotedMessage": message.QuotedMessage,
+			"MessageOrigin": message.QuotedMessage,
 		}
 	}
 	if pushname := evt.Info.PushName; pushname != "" {
@@ -92,6 +92,9 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	body["MyNumber"] = MyNumber
 
 	body["Type"] = determineMessageType(evt, message.Text)
+
+	// Adiciona a porta configurada no payload
+	body["Port"] = config.AppPort
 
 	if audioMedia := evt.Message.GetAudioMessage(); audioMedia != nil {
 		path, err := ExtractMedia(ctx, config.PathMedia, audioMedia)
