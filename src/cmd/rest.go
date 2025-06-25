@@ -188,9 +188,7 @@ func restServer(_ *cobra.Command, _ []string) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
 		}
 
-		// Chave única para cache
 		cacheKey := request.CallID + ":" + request.Phone
-		// Verifica se já foi processado
 		if _, exists := callWebhookCache.LoadOrStore(cacheKey, time.Now()); exists {
 			logrus.Infof("Webhook para call_id %s e Phone %s já enviado, ignorando", request.CallID, request.Phone)
 			return c.JSON(fiber.Map{
@@ -200,7 +198,6 @@ func restServer(_ *cobra.Command, _ []string) {
 			})
 		}
 
-		// Expira a entrada após cacheTTL
 		go func() {
 			time.Sleep(cacheTTL)
 			callWebhookCache.Delete(cacheKey)
@@ -208,7 +205,7 @@ func restServer(_ *cobra.Command, _ []string) {
 
 		err = waCli.RejectCall(jid, request.CallID)
 		if err != nil {
-			callWebhookCache.Delete(cacheKey) // Remove da cache em caso de erro
+			callWebhookCache.Delete(cacheKey)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to reject call: %v", err)})
 		}
 
@@ -218,7 +215,7 @@ func restServer(_ *cobra.Command, _ []string) {
 					"SenderNumber": request.Phone,
 					"Call_Id":      request.CallID,
 					"Type":         "call_received",
-					"Status_Call":       "rejected",
+					"Status_Call":  "rejected",
 					"timestamp":    time.Now().Format(time.RFC3339),
 					"IsGroup":      false,
 				}
@@ -240,7 +237,7 @@ func restServer(_ *cobra.Command, _ []string) {
 	app.Post("/chat/send/audio", func(c *fiber.Ctx) error {
 		var request struct {
 			Phone string `json:"Phone"`
-			Media string `json:"media"` // Pode ser Base64 ou caminho do arquivo
+			Media string `json:"media"`
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -333,6 +330,7 @@ func restServer(_ *cobra.Command, _ []string) {
 			FileName     string `json:"FileName"`
 			Caption      string `json:"Caption"`
 			DocumentPath string `json:"DocumentPath"`
+			IsForwarded  bool   `json:"is_forwarded"`
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -381,7 +379,7 @@ func restServer(_ *cobra.Command, _ []string) {
 			logrus.Infof("Temporary file saved at %s for debugging", tempPath)
 		}
 
-		err = whatsapp.SendDocumentMessage(context.Background(), jid, documentData, mimeType, request.FileName, request.Caption)
+		err = whatsapp.SendDocumentMessage(context.Background(), jid, documentData, mimeType, request.FileName, request.Caption, request.IsForwarded)
 		if err != nil {
 			logrus.Errorf("Failed to send document message to %s: %v", jid.String(), err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send document message: %v", err)})
@@ -393,9 +391,11 @@ func restServer(_ *cobra.Command, _ []string) {
 
 	app.Post("/chat/send/video", func(c *fiber.Ctx) error {
 		var request struct {
-			Phone     string `json:"Phone"`
-			Caption   string `json:"Caption"`
-			VideoPath string `json:"VideoPath"`
+			Phone       string `json:"Phone"`
+			Caption     string `json:"Caption"`
+			VideoPath   string `json:"VideoPath"`
+			ViewOnce    bool   `json:"view_once"`
+			IsForwarded bool   `json:"is_forwarded"`
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -444,7 +444,7 @@ func restServer(_ *cobra.Command, _ []string) {
 			logrus.Infof("Temporary file saved at %s for debugging", tempPath)
 		}
 
-		err = whatsapp.SendVideoMessage(context.Background(), jid, videoData, mimeType, filepath.Base(request.VideoPath), request.Caption)
+		err = whatsapp.SendVideoMessage(context.Background(), jid, videoData, mimeType, filepath.Base(request.VideoPath), request.Caption, request.ViewOnce, request.IsForwarded)
 		if err != nil {
 			logrus.Errorf("Failed to send video message to %s: %v", jid.String(), err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send video message: %v", err)})
@@ -456,9 +456,11 @@ func restServer(_ *cobra.Command, _ []string) {
 
 	app.Post("/chat/send/image", func(c *fiber.Ctx) error {
 		var request struct {
-			Phone     string `json:"Phone"`
-			Caption   string `json:"Caption"`
-			ImagePath string `json:"ImagePath"`
+			Phone       string `json:"Phone"`
+			Caption     string `json:"Caption"`
+			ImagePath   string `json:"ImagePath"`
+			ViewOnce    bool   `json:"view_once"`
+			IsForwarded bool   `json:"is_forwarded"`
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -507,7 +509,7 @@ func restServer(_ *cobra.Command, _ []string) {
 			logrus.Infof("Temporary file saved at %s for debugging", tempPath)
 		}
 
-		err = whatsapp.SendImageMessage(context.Background(), jid, imageData, mimeType, filepath.Base(request.ImagePath), request.Caption)
+		err = whatsapp.SendImageMessage(context.Background(), jid, imageData, mimeType, filepath.Base(request.ImagePath), request.Caption, request.ViewOnce, request.IsForwarded)
 		if err != nil {
 			logrus.Errorf("Failed to send image message to %s: %v", jid.String(), err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send image message: %v", err)})
@@ -555,7 +557,6 @@ func restServer(_ *cobra.Command, _ []string) {
 		return c.JSON(fiber.Map{"status": "Location sent"})
 	})
 
-	// Endpoint: Deletar Mensagem (sem agendamento)
 	app.Post("/chat/delete-message", func(c *fiber.Ctx) error {
 		var request struct {
 			Phone     string `json:"Phone"`
@@ -587,7 +588,6 @@ func restServer(_ *cobra.Command, _ []string) {
 		_, err = waCli.RevokeMessage(jid, messageID)
 		if err != nil {
 			logrus.Errorf("Failed to revoke message %s in chat %s: %v", messageID, jid.String(), err)
-			// Verifica se o erro é devido ao tempo limite do WhatsApp
 			if strings.Contains(err.Error(), "too old") || strings.Contains(err.Error(), "not allowed") {
 				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Message deletion not allowed: likely too old or not sent by you"})
 			}
@@ -598,13 +598,12 @@ func restServer(_ *cobra.Command, _ []string) {
 		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s deleted", messageID)})
 	})
 
-	// Endpoint: Marcar Mensagem como Lida (corrigido e com depuração)
 	app.Post("/chat/mark-read", func(c *fiber.Ctx) error {
 		var request struct {
 			Phone     string `json:"Phone"`
 			MessageID string `json:"message_id"`
-			Sender    string `json:"sender"` // Obrigatório para grupos
-			Played    bool   `json:"played"` // true para marcar como reproduzida (voz)
+			Sender    string `json:"sender"`
+			Played    bool   `json:"played"`
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -690,7 +689,6 @@ func restServer(_ *cobra.Command, _ []string) {
 	}
 }
 
-// determineMimeType é uma função auxiliar para determinar o MIME type manualmente
 func determineMimeType(filename string) string {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
 	switch ext {
