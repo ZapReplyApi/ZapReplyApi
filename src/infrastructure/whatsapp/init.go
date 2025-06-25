@@ -160,7 +160,7 @@ func SendAudioMessage(ctx context.Context, jid types.JID, audioData []byte, mime
 	return nil
 }
 
-func SendDocumentMessage(ctx context.Context, jid types.JID, documentData []byte, mimeType, fileName, caption string) error {
+func SendDocumentMessage(ctx context.Context, jid types.JID, documentData []byte, mimeType, fileName, caption string, isForwarded bool) error {
 	if cli == nil {
 		logrus.Error("WhatsApp client is nil")
 		return fmt.Errorf("WhatsApp client not initialized")
@@ -186,18 +186,26 @@ func SendDocumentMessage(ctx context.Context, jid types.JID, documentData []byte
 		return fmt.Errorf("failed to upload document: %v", err)
 	}
 
+	docMsg := &waProto.DocumentMessage{
+		Mimetype:      proto.String(mimeType),
+		URL:           proto.String(string(upload.URL)),
+		DirectPath:    proto.String(upload.DirectPath),
+		MediaKey:      upload.MediaKey,
+		FileEncSHA256: upload.FileEncSHA256,
+		FileSHA256:    upload.FileSHA256,
+		FileLength:    proto.Uint64(uint64(len(documentData))),
+		FileName:      proto.String(fileName),
+		Caption:       proto.String(caption),
+	}
+
+	if isForwarded {
+		docMsg.ContextInfo = &waProto.ContextInfo{
+			IsForwarded: proto.Bool(true),
+		}
+	}
+
 	msg := &waProto.Message{
-		DocumentMessage: &waProto.DocumentMessage{
-			Mimetype:      proto.String(mimeType),
-			URL:           proto.String(string(upload.URL)),
-			DirectPath:    proto.String(upload.DirectPath),
-			MediaKey:      upload.MediaKey,
-			FileEncSHA256: upload.FileEncSHA256,
-			FileSHA256:    upload.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(documentData))),
-			FileName:      proto.String(fileName),
-			Caption:       proto.String(caption),
-		},
+		DocumentMessage: docMsg,
 	}
 
 	_, err = cli.SendMessage(ctx, jid, msg)
@@ -209,7 +217,7 @@ func SendDocumentMessage(ctx context.Context, jid types.JID, documentData []byte
 	return nil
 }
 
-func SendVideoMessage(ctx context.Context, jid types.JID, videoData []byte, mimeType, fileName, caption string) error {
+func SendVideoMessage(ctx context.Context, jid types.JID, videoData []byte, mimeType, fileName, caption string, viewOnce, isForwarded bool) error {
 	if cli == nil {
 		logrus.Error("WhatsApp client is nil")
 		return fmt.Errorf("WhatsApp client not initialized")
@@ -235,17 +243,26 @@ func SendVideoMessage(ctx context.Context, jid types.JID, videoData []byte, mime
 		return fmt.Errorf("failed to upload video: %v", err)
 	}
 
+	videoMsg := &waProto.VideoMessage{
+		Mimetype:      proto.String(mimeType),
+		URL:           proto.String(string(upload.URL)),
+		DirectPath:    proto.String(upload.DirectPath),
+		MediaKey:      upload.MediaKey,
+		FileEncSHA256: upload.FileEncSHA256,
+		FileSHA256:    upload.FileSHA256,
+		FileLength:    proto.Uint64(uint64(len(videoData))),
+		Caption:       proto.String(caption),
+		ViewOnce:      proto.Bool(viewOnce),
+	}
+
+	if isForwarded {
+		videoMsg.ContextInfo = &waProto.ContextInfo{
+			IsForwarded: proto.Bool(true),
+		}
+	}
+
 	msg := &waProto.Message{
-		VideoMessage: &waProto.VideoMessage{
-			Mimetype:      proto.String(mimeType),
-			URL:           proto.String(string(upload.URL)),
-			DirectPath:    proto.String(upload.DirectPath),
-			MediaKey:      upload.MediaKey,
-			FileEncSHA256: upload.FileEncSHA256,
-			FileSHA256:    upload.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(videoData))),
-			Caption:       proto.String(caption),
-		},
+		VideoMessage: videoMsg,
 	}
 
 	_, err = cli.SendMessage(ctx, jid, msg)
@@ -257,7 +274,7 @@ func SendVideoMessage(ctx context.Context, jid types.JID, videoData []byte, mime
 	return nil
 }
 
-func SendImageMessage(ctx context.Context, jid types.JID, imageData []byte, mimeType, fileName, caption string) error {
+func SendImageMessage(ctx context.Context, jid types.JID, imageData []byte, mimeType, fileName, caption string, viewOnce, isForwarded bool) error {
 	if cli == nil {
 		logrus.Error("WhatsApp client is nil")
 		return fmt.Errorf("WhatsApp client not initialized")
@@ -283,17 +300,26 @@ func SendImageMessage(ctx context.Context, jid types.JID, imageData []byte, mime
 		return fmt.Errorf("failed to upload image: %v", err)
 	}
 
+	imageMsg := &waProto.ImageMessage{
+		Mimetype:      proto.String(mimeType),
+		URL:           proto.String(string(upload.URL)),
+		DirectPath:    proto.String(upload.DirectPath),
+		MediaKey:      upload.MediaKey,
+		FileEncSHA256: upload.FileEncSHA256,
+		FileSHA256:    upload.FileSHA256,
+		FileLength:    proto.Uint64(uint64(len(imageData))),
+		Caption:       proto.String(caption),
+		ViewOnce:      proto.Bool(viewOnce),
+	}
+
+	if isForwarded {
+		imageMsg.ContextInfo = &waProto.ContextInfo{
+			IsForwarded: proto.Bool(true),
+		}
+	}
+
 	msg := &waProto.Message{
-		ImageMessage: &waProto.ImageMessage{
-			Mimetype:      proto.String(mimeType),
-			URL:           proto.String(string(upload.URL)),
-			DirectPath:    proto.String(upload.DirectPath),
-			MediaKey:      upload.MediaKey,
-			FileEncSHA256: upload.FileEncSHA256,
-			FileSHA256:    upload.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(imageData))),
-			Caption:       proto.String(caption),
-		},
+		ImageMessage: imageMsg,
 	}
 
 	_, err = cli.SendMessage(ctx, jid, msg)
@@ -424,12 +450,12 @@ func handleCallOffer(ctx context.Context, evt *events.CallOffer) {
 	if len(config.WhatsappWebhook) > 0 {
 		go func() {
 			payload := map[string]interface{}{
-				"SenderNumber":      evt.From.String(),
-				"Call_Id":   evt.CallID,
-				"Type":      "call_received",
-				"Status_Call":    "received",
-				"timestamp": evt.Timestamp.Format(time.RFC3339),
-				"IsGroup":   false,
+				"SenderNumber": evt.From.String(),
+				"Call_Id":      evt.CallID,
+				"Type":         "call_received",
+				"Status_Call":  "received",
+				"timestamp":    evt.Timestamp.Format(time.RFC3339),
+				"IsGroup":      false,
 			}
 			for _, url := range config.WhatsappWebhook {
 				if err := SubmitWebhook(payload, url); err != nil {
@@ -542,10 +568,10 @@ func buildEventMessage(evt *events.Message) evtMessage {
 		message.QuotedMessage = extendedMessage.ContextInfo.GetQuotedMessage().GetConversation()
 	} else if protocolMessage := evt.Message.GetProtocolMessage(); protocolMessage != nil {
 		if editedMessage := protocolMessage.GetEditedMessage(); editedMessage != nil {
-			if extendedText := editedMessage.GetExtendedTextMessage(); extendedText != nil {
-				message.Text = extendedText.GetText()
-				message.RepliedId = extendedText.ContextInfo.GetStanzaID()
-				message.QuotedMessage = extendedText.ContextInfo.GetQuotedMessage().GetConversation()
+			if extendedMessage := editedMessage.GetExtendedTextMessage(); extendedMessage != nil {
+				message.Text = extendedMessage.GetText()
+				message.RepliedId = extendedMessage.ContextInfo.GetStanzaID()
+				message.QuotedMessage = extendedMessage.ContextInfo.GetQuotedMessage().GetConversation()
 			}
 		}
 	}
