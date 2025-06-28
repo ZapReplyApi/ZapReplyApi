@@ -44,7 +44,23 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	if from := evt.Info.SourceString(); from != "" {
 		body["SenderNumber"] = from
 	}
-	if message.ID != "" {
+
+	// Adiciona informações da enquete, se for uma atualização de votação
+	if pollUpdate := evt.Message.GetPollUpdateMessage(); pollUpdate != nil {
+		// Log para depuração: capturar dados brutos do PollUpdateMessage
+		logrus.Debugf("PollUpdateMessage received: %+v", pollUpdate)
+		body["message"] = map[string]interface{}{
+			"ID":            evt.Info.ID,
+			"TextMessage":   message.Text,
+			"RepliedId":     message.RepliedId,
+			"MessageOrigin": message.QuotedMessage,
+			"PollUpdate": map[string]interface{}{
+				"PollID": pollUpdate.GetPollCreationMessageKey().GetID(),
+				// Placeholder: opções selecionadas não implementadas devido à falta de GetSelectedOptions
+				"SelectedOptions": []map[string]interface{}{},
+			},
+		}
+	} else {
 		body["message"] = map[string]interface{}{
 			"ID":            message.ID,
 			"TextMessage":   message.Text,
@@ -52,6 +68,7 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 			"MessageOrigin": message.QuotedMessage,
 		}
 	}
+
 	if pushname := evt.Info.PushName; pushname != "" {
 		body["PushName"] = pushname
 	}
@@ -155,6 +172,13 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	return body, nil
 }
 
+// Função auxiliar para obter o título da opção da enquete
+func getPollOptionTitle(ctx context.Context, evt *events.Message, option []byte) string {
+	// Placeholder: Retorna o hash da opção como string.
+	// Para obter o título real, implemente lógica para consultar a mensagem original da enquete.
+	return fmt.Sprintf("Option_%x", option)
+}
+
 func determineMessageType(evt *events.Message, text string) string {
 	if evt.Message.GetAudioMessage() != nil {
 		if evt.Message.GetAudioMessage().GetPTT() {
@@ -193,6 +217,9 @@ func determineMessageType(evt *events.Message, text string) string {
 		return "payment"
 	}
 	if evt.Message.GetPollCreationMessageV3() != nil || evt.Message.GetPollCreationMessageV4() != nil || evt.Message.GetPollCreationMessageV5() != nil {
+		return "poll"
+	}
+	if evt.Message.GetPollUpdateMessage() != nil {
 		return "poll"
 	}
 	if evt.Message.GetReactionMessage() != nil {
