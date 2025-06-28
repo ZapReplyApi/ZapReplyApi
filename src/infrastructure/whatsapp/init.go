@@ -376,7 +376,7 @@ func handler(ctx context.Context, rawEvt interface{}) {
 	case *events.Connected, *events.PushNameSetting:
 		handleConnected(ctx)
 	case *events.StreamReplaced:
-	 handleStreamReplaced(ctx)
+		handleStreamReplaced(ctx)
 	case *events.Message:
 		handleMessage(ctx, evt)
 	case *events.Receipt:
@@ -448,18 +448,21 @@ func handleMessage(ctx context.Context, evt *events.Message) {
 func handleCallOffer(ctx context.Context, evt *events.CallOffer) {
 	log.Infof("Received call offer %s from %s", evt.CallID, evt.From.String())
 	if len(config.WhatsappWebhook) > 0 {
-		for _, url := range config.WhatsappWebhook {
-			if err := SubmitWebhook(map[string]interface{}{
+		go func() {
+			payload := map[string]interface{}{
 				"SenderNumber": evt.From.String(),
 				"Call_Id":      evt.CallID,
 				"Type":         "call_received",
 				"Status_Call":  "received",
 				"timestamp":    evt.Timestamp.Format(time.RFC3339),
-				"IsGroup":      strings.Contains(evt.From.String(), "@g.us"),
-			}, url); err != nil {
-				logrus.Errorf("Failed to send call webhook: %v", err)
+				"IsGroup":      false,
 			}
-		}
+			for _, url := range config.WhatsappWebhook {
+				if err := SubmitWebhook(payload, url); err != nil {
+					logrus.Errorf("Failed to send call webhook: %v", err)
+				}
+			}
+		}()
 	}
 }
 
@@ -492,11 +495,12 @@ func handleImageMessage(ctx context.Context, evt *events.Message) {
 
 func handleAutoReply(evt *events.Message) {
 	if config.WhatsappAutoReplyMessage != "" &&
+		!strings.Contains(evt.Info.Chat.String(), "@g.us") &&
 		!evt.Info.IsIncomingBroadcast() &&
-		(evt.Message.GetConversation() != "" || evt.Message.GetExtendedTextMessage() != nil) {
+		evt.Message.GetExtendedTextMessage().GetText() != "" {
 		_, _ = cli.SendMessage(
 			context.Background(),
-			evt.Info.Chat,
+			FormatJID(evt.Info.Sender.String()),
 			&waProto.Message{Conversation: proto.String(config.WhatsappAutoReplyMessage)},
 		)
 	}
@@ -506,15 +510,6 @@ func handleWebhookForward(ctx context.Context, evt *events.Message) {
 	if len(config.WhatsappWebhook) > 0 &&
 		!strings.Contains(evt.Info.SourceString(), "broadcast") {
 		go func(evt *events.Message) {
-			payload := map[string]interface{}{
-				"MessageID":    evt.Info.ID,
-				"Sender":       evt.Info.Sender.String(),
-				"Chat":         evt.Info.Chat.String(),
-				"Text":         ExtractMessageText(evt),
-				"Type":         evt.Info.Type,
-				"IsGroup":      strings.Contains(evt.Info.Chat.String(), "@g.us"),
-				"Timestamp":    evt.Info.Timestamp.Format(time.RFC3339),
-			}
 			if err := forwardToWebhook(ctx, evt); err != nil {
 				logrus.Error("Failed forward to webhook: ", err)
 			}
@@ -563,24 +558,20 @@ func handleAppState(ctx context.Context, evt *events.AppState) {
 
 func buildEventMessage(evt *events.Message) evtMessage {
 	message := evtMessage{
-		Text: ExtractMessageText(evt),
+		Text: evt.Message.GetConversation(),
 		ID:   evt.Info.ID,
 	}
 
 	if extendedMessage := evt.Message.GetExtendedTextMessage(); extendedMessage != nil {
 		message.Text = extendedMessage.GetText()
 		message.RepliedId = extendedMessage.ContextInfo.GetStanzaID()
-		if quoted := extendedMessage.ContextInfo.GetQuotedMessage(); quoted != nil {
-			message.QuotedMessage = quoted.GetConversation()
-		}
+		message.QuotedMessage = extendedMessage.ContextInfo.GetQuotedMessage().GetConversation()
 	} else if protocolMessage := evt.Message.GetProtocolMessage(); protocolMessage != nil {
 		if editedMessage := protocolMessage.GetEditedMessage(); editedMessage != nil {
 			if extendedMessage := editedMessage.GetExtendedTextMessage(); extendedMessage != nil {
 				message.Text = extendedMessage.GetText()
 				message.RepliedId = extendedMessage.ContextInfo.GetStanzaID()
-				if quoted := extendedMessage.ContextInfo.GetQuotedMessage(); quoted != nil {
-					message.QuotedMessage = quoted.GetConversation()
-				}
+				message.QuotedMessage = extendedMessage.ContextInfo.GetQuotedMessage().GetConversation()
 			}
 		}
 	}
