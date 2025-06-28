@@ -27,6 +27,7 @@ import (
 	"github.com/gofiber/template/html/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	_ "go.mau.fi/whatsmeow" // Import em branco para evitar erro de "imported and not used"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
@@ -152,8 +153,8 @@ func restServer(_ *cobra.Command, _ []string) {
 		if request.ReplyMessageID != "" {
 			msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{
 				StanzaID:      proto.String(request.ReplyMessageID),
-				Participant:   proto.String(request.Phone),
-				QuotedMessage: &waProto.Message{Conversation: proto.String("")},
+				Participant:   proto.String(request.Phone), // Usar o mesmo JID como participante
+				QuotedMessage: &waProto.Message{Conversation: proto.String("")}, // Mensagem vazia para citação
 			}
 		}
 
@@ -266,14 +267,14 @@ func restServer(_ *cobra.Command, _ []string) {
 		}
 
 		if len(config.WhatsappWebhook) > 0 {
-			go func() {
+			go func	() {
 				payload := map[string]interface{}{
 					"SenderNumber": request.Phone,
 					"Call_Id":      request.CallID,
 					"Type":         "call_received",
 					"Status_Call":  "rejected",
 					"timestamp":    time.Now().Format(time.RFC3339),
-					"IsGroup":      strings.Contains(request.Phone, "@g.us"),
+					"IsGroup":      false,
 				}
 				for _, url := range config.WhatsappWebhook {
 					if err := whatsapp.SubmitWebhook(payload, url); err != nil {
@@ -652,10 +653,10 @@ func restServer(_ *cobra.Command, _ []string) {
 
 	app.Post("/chat/mark-read", func(c *fiber.Ctx) error {
 		var request struct {
-			Phone     string `json:"phone"`
+			Phone     string `json:"Phone"`
 			MessageID string `json:"message_id"`
-			Sender    string `json:"sender,omitempty"`
-			Played    string `json:"played"` // Alterado de bool para string
+			Sender    string `json:"sender"`
+			Played    bool   `json:"played"`
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -686,23 +687,20 @@ func restServer(_ *cobra.Command, _ []string) {
 				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid sender JID: %v", err)})
 			}
 		} else if strings.Contains(chatJID.String(), "@g.us") {
-			logrus.Warnf("Sender not provided for group chat %s, marking read may fail", chatJID.String())
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Sender is required for group chats"})
 		}
 
 		messageID := types.MessageID(request.MessageID)
 		timestamp := time.Now()
 
 		var receiptTypeExtra []types.ReceiptType
-		switch strings.ToLower(request.Played) {
-		case "audio":
+		if request.Played {
 			receiptTypeExtra = append(receiptTypeExtra, types.ReceiptTypePlayed)
-		case "text":
+		} else {
 			receiptTypeExtra = append(receiptTypeExtra, types.ReceiptTypeRead)
-		default:
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid 'played' value. Use 'audio' or 'text'"})
 		}
 
-		logrus.Debugf("Marking message %s as read in chat %s with sender %s, played: %s", messageID, chatJID.String(), senderJID.String(), request.Played)
+		logrus.Debugf("Marking message %s as read in chat %s with sender %s, played: %v", messageID, chatJID.String(), senderJID.String(), request.Played)
 		err = waCli.MarkRead([]types.MessageID{messageID}, timestamp, chatJID, senderJID, receiptTypeExtra...)
 		if err != nil {
 			logrus.Errorf("Failed to mark message %s as read in chat %s: %v", messageID, chatJID.String(), err)
@@ -710,7 +708,7 @@ func restServer(_ *cobra.Command, _ []string) {
 		}
 		logrus.Infof("Message %s marked as read in chat %s", messageID, chatJID.String())
 
-		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s marked as %s", messageID, request.Played)})
+		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s marked as read", messageID)})
 	})
 
 	rest.InitRestApp(app, appUsecase)
