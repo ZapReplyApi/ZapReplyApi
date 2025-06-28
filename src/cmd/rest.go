@@ -27,7 +27,9 @@ import (
 	"github.com/gofiber/template/html/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
 var restCmd = &cobra.Command{
@@ -110,6 +112,60 @@ func restServer(_ *cobra.Command, _ []string) {
 			Users: account,
 		}))
 	}
+
+	// Endpoint para enviar mensagens com citação
+	app.Post("/send/message", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone          string `json:"phone"`
+			Message        string `json:"message"`
+			ReplyMessageID string `json:"reply_message_id"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.Message == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and message are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		msg := &waProto.Message{
+			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+				Text: proto.String(request.Message),
+			},
+		}
+
+		// Adicionar citação se reply_message_id for fornecido
+		if request.ReplyMessageID != "" {
+			msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{
+				StanzaID:      proto.String(request.ReplyMessageID),
+				Participant:   proto.String(request.Phone),
+				QuotedMessage: &waProto.Message{Conversation: proto.String("")},
+			}
+		}
+
+		_, err = waCli.SendMessage(context.Background(), jid, msg)
+		if err != nil {
+			logrus.Errorf("Failed to send message to %s: %v", jid.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send message: %v", err)})
+		}
+		logrus.Infof("Message sent successfully to %s", jid.String())
+
+		return c.JSON(fiber.Map{"status": "Message sent"})
+	})
 
 	app.Post("/send-presence", func(c *fiber.Ctx) error {
 		var request struct {
@@ -217,7 +273,7 @@ func restServer(_ *cobra.Command, _ []string) {
 					"Type":         "call_received",
 					"Status_Call":  "rejected",
 					"timestamp":    time.Now().Format(time.RFC3339),
-					"IsGroup":      false,
+					"IsGroup":      strings.Contains(request.Phone, "@g.us"),
 				}
 				for _, url := range config.WhatsappWebhook {
 					if err := whatsapp.SubmitWebhook(payload, url); err != nil {
@@ -287,10 +343,6 @@ func restServer(_ *cobra.Command, _ []string) {
 				mimeType = http.DetectContentType(audioData)
 				logrus.Warnf("MIME type not detected by extension for file %s, auto-detected as %s", request.Media, mimeType)
 			}
-		}
-
-		if int64(len(audioData)) > config.WhatsappSettingMaxFileSize {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Audio size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxFileSize)})
 		}
 
 		switch mimeType {
@@ -600,10 +652,10 @@ func restServer(_ *cobra.Command, _ []string) {
 
 	app.Post("/chat/mark-read", func(c *fiber.Ctx) error {
 		var request struct {
-			Phone     string `json:"Phone"`
+			Phone     string `json:"phone"`
 			MessageID string `json:"message_id"`
-			Sender    string `json:"sender"`
-			Played    bool   `json:"played"`
+			Sender    string `json:"sender,omitempty"`
+			Played    string `json:"played"` // Alterado de bool para string
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -634,20 +686,23 @@ func restServer(_ *cobra.Command, _ []string) {
 				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid sender JID: %v", err)})
 			}
 		} else if strings.Contains(chatJID.String(), "@g.us") {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Sender is required for group chats"})
+			logrus.Warnf("Sender not provided for group chat %s, marking read may fail", chatJID.String())
 		}
 
 		messageID := types.MessageID(request.MessageID)
 		timestamp := time.Now()
 
 		var receiptTypeExtra []types.ReceiptType
-		if request.Played {
+		switch strings.ToLower(request.Played) {
+		case "audio":
 			receiptTypeExtra = append(receiptTypeExtra, types.ReceiptTypePlayed)
-		} else {
+		case "text":
 			receiptTypeExtra = append(receiptTypeExtra, types.ReceiptTypeRead)
+		default:
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid 'played' value. Use 'audio' or 'text'"})
 		}
 
-		logrus.Debugf("Marking message %s as read in chat %s with sender %s, played: %v", messageID, chatJID.String(), senderJID.String(), request.Played)
+		logrus.Debugf("Marking message %s as read in chat %s with sender %s, played: %s", messageID, chatJID.String(), senderJID.String(), request.Played)
 		err = waCli.MarkRead([]types.MessageID{messageID}, timestamp, chatJID, senderJID, receiptTypeExtra...)
 		if err != nil {
 			logrus.Errorf("Failed to mark message %s as read in chat %s: %v", messageID, chatJID.String(), err)
@@ -655,7 +710,7 @@ func restServer(_ *cobra.Command, _ []string) {
 		}
 		logrus.Infof("Message %s marked as read in chat %s", messageID, chatJID.String())
 
-		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s marked as read", messageID)})
+		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s marked as %s", messageID, request.Played)})
 	})
 
 	rest.InitRestApp(app, appUsecase)
@@ -679,12 +734,12 @@ func restServer(_ *cobra.Command, _ []string) {
 	go websocket.RunHub()
 
 	go helpers.SetAutoConnectAfterBooting(appUsecase)
-	go helpers.SetAutoReconnectChecking(whatsappCli)
+	go helpers.SetAutoReconnectChecking(whatsapp.GetWaCli())
 	if config.WhatsappChatStorage {
 		go helpers.StartAutoFlushChatStorage()
 	}
 
-	if err = app.Listen(":" + config.AppPort); err != nil {
+	if err := app.Listen(":" + config.AppPort); err != nil {
 		log.Fatalln("Failed to start: ", err.Error())
 	}
 }
