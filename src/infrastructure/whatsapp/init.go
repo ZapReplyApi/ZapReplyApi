@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,10 +43,13 @@ type evtMessage struct {
 }
 
 var (
-	cli           *whatsmeow.Client
-	log           waLog.Logger
-	historySyncID int32
-	startupTime   = time.Now().Unix()
+	cli                *whatsmeow.Client
+	log                waLog.Logger
+	historySyncID      int32
+	startupTime        = time.Now().Unix()
+	pollOptionsCache   = make(map[string]map[string]string)
+	cacheMutex         sync.RWMutex
+	messageSenderCache = sync.Map{}
 )
 
 func InitWaDB(ctx context.Context) *sqlstore.Container {
@@ -380,13 +384,15 @@ func handler(ctx context.Context, rawEvt interface{}) {
 	case *events.Message:
 		handleMessage(ctx, evt)
 	case *events.Receipt:
-		handleReceipt(ctx, evt)
+	 handleReceipt(ctx, evt)
 	case *events.HistorySync:
 		handleHistorySync(ctx, evt)
 	case *events.AppState:
 		handleAppState(ctx, evt)
 	case *events.CallOffer:
 		handleCallOffer(ctx, evt)
+	default:
+		logrus.Debugf("Received unhandled event type: %T", rawEvt)
 	}
 }
 
@@ -430,12 +436,47 @@ func handleStreamReplaced(_ context.Context) {
 
 func handleMessage(ctx context.Context, evt *events.Message) {
 	metaParts := buildMessageMetaParts(evt)
-	log.Infof("Received message %s from %s (%s): %+v",
+	logrus.Infof("Mensagem recebida %s de %s (%s): %+v",
 		evt.Info.ID,
 		evt.Info.SourceString(),
 		strings.Join(metaParts, ", "),
 		evt.Message,
 	)
+
+	// Armazenar remetente para mensagens de grupo
+	if strings.Contains(evt.Info.Chat.String(), "@g.us") {
+		RecordMessage(evt.Info.ID, evt.Info.Sender.String(), ExtractMessageText(evt))
+	}
+
+	// Log detalhado para verificar se o PollCreationMessage é recebido
+	if pollCreation := evt.Message.GetPollCreationMessage(); pollCreation != nil {
+		pollID := evt.Info.ID
+		logrus.Infof("PollCreationMessage received: PollID=%s, Question=%s, OptionsCount=%d, Options=%v",
+			pollID, pollCreation.GetName(), len(pollCreation.GetOptions()), pollCreation.GetOptions())
+		options := make([]string, 0, len(pollCreation.GetOptions()))
+		for _, opt := range pollCreation.GetOptions() {
+			options = append(options, opt.GetOptionName())
+		}
+		hashes := whatsmeow.HashPollOptions(options)
+		optionMap := make(map[string]string)
+		for i, opt := range options {
+			hashStr := fmt.Sprintf("%x", hashes[i])
+			optionMap[hashStr] = opt
+			logrus.Debugf("Stored poll option: PollID=%s, Hash=%s, Title=%s", pollID, hashStr, opt)
+		}
+		cacheMutex.Lock()
+		if _, exists := pollOptionsCache[pollID]; exists {
+			logrus.Warnf("PollID %s already exists in cache, overwriting with new options", pollID)
+		}
+		pollOptionsCache[pollID] = optionMap
+		cacheMutex.Unlock()
+		logrus.Infof("Stored poll options for PollID %s: %+v", pollID, optionMap)
+		cacheMutex.RLock()
+		logrus.Debugf("Current pollOptionsCache after PollCreation: %+v", pollOptionsCache)
+		cacheMutex.RUnlock()
+	} else {
+		logrus.Debugf("No PollCreationMessage: MessageID=%s, Type=%s", evt.Info.ID, evt.Info.Type)
+	}
 
 	message := ExtractMessageText(evt)
 	RecordMessage(evt.Info.ID, evt.Info.Sender.String(), message)
@@ -601,5 +642,17 @@ func buildForwarded(evt *events.Message) bool {
 }
 
 func RecordMessage(id, sender, message string) {
-	// Placeholder para registro de mensagem, ajuste conforme necessário
+	if strings.Contains(sender, "@s.whatsapp.net") {
+		messageSenderCache.Store(id, sender)
+		logrus.Debugf("Armazenado remetente %s para mensagem %s", sender, id)
+	}
+}
+
+// Funções para acessar o cache e mutex
+func GetPollOptionsCache() map[string]map[string]string {
+	return pollOptionsCache
+}
+
+func GetCacheMutex() *sync.RWMutex {
+	return &cacheMutex
 }
