@@ -27,7 +27,7 @@ import (
 	"github.com/gofiber/template/html/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	_ "go.mau.fi/whatsmeow" // Import em branco para evitar erro de "imported and not used"
+	_ "go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
@@ -45,7 +45,6 @@ func init() {
 }
 
 var (
-	// Cache para evitar múltiplos webhooks para o mesmo call_id e Phone
 	callWebhookCache = sync.Map{}
 	cacheTTL         = 5 * time.Minute
 )
@@ -117,30 +116,45 @@ func restServer(_ *cobra.Command, _ []string) {
 	// Endpoint para enviar mensagens com citação
 	app.Post("/send/message", func(c *fiber.Ctx) error {
 		var request struct {
-			Phone          string `json:"phone"`
+			Phone          string `json:"Phone"`
+			Jid            string `json:"Jid"` // Mantido para compatibilidade com grupos
 			Message        string `json:"message"`
 			ReplyMessageID string `json:"reply_message_id"`
 		}
 		if err := c.BodyParser(&request); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Corpo da requisição inválido"})
 		}
 
-		if request.Phone == "" || request.Message == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and message are required"})
+		// Validar se pelo menos Phone ou Jid foi fornecido
+		if request.Phone == "" && request.Jid == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone ou Jid é obrigatório"})
+		}
+		if request.Message == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Message é obrigatório"})
 		}
 
 		waCli := whatsapp.GetWaCli()
 		if waCli == nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Cliente WhatsApp não inicializado"})
 		}
 
 		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Cliente WhatsApp não conectado ou logado"})
 		}
 
-		jid, err := whatsapp.ParseJID(request.Phone)
-		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		// Determinar o JID a ser usado (Phone para contatos individuais, Jid para grupos)
+		var jid types.JID
+		var err error
+		if request.Jid != "" {
+			jid, err = whatsapp.ParseJID(request.Jid)
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Jid inválido: %v", err)})
+			}
+		} else {
+			jid, err = whatsapp.ParseJID(request.Phone)
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Phone inválido: %v", err)})
+			}
 		}
 
 		msg := &waProto.Message{
@@ -149,23 +163,33 @@ func restServer(_ *cobra.Command, _ []string) {
 			},
 		}
 
-		// Adicionar citação se reply_message_id for fornecido
 		if request.ReplyMessageID != "" {
+			participant := jid.String()
+			if strings.Contains(jid.String(), "@g.us") {
+				if request.Phone == "" {
+					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone é obrigatório para citações em grupos"})
+				}
+				senderJID, err := whatsapp.ParseJID(request.Phone)
+				if err != nil {
+					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Phone inválido para citação: %v", err)})
+				}
+				participant = senderJID.String()
+			}
 			msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{
 				StanzaID:      proto.String(request.ReplyMessageID),
-				Participant:   proto.String(request.Phone), // Usar o mesmo JID como participante
-				QuotedMessage: &waProto.Message{Conversation: proto.String("")}, // Mensagem vazia para citação
+				Participant:   proto.String(participant),
+				QuotedMessage: &waProto.Message{Conversation: proto.String("")},
 			}
 		}
 
 		_, err = waCli.SendMessage(context.Background(), jid, msg)
 		if err != nil {
-			logrus.Errorf("Failed to send message to %s: %v", jid.String(), err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send message: %v", err)})
+			logrus.Errorf("Falha ao enviar mensagem para %s: %v", jid.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Falha ao enviar mensagem: %v", err)})
 		}
-		logrus.Infof("Message sent successfully to %s", jid.String())
+		logrus.Infof("Mensagem enviada com sucesso para %s", jid.String())
 
-		return c.JSON(fiber.Map{"status": "Message sent"})
+		return c.JSON(fiber.Map{"status": "Mensagem enviada"})
 	})
 
 	app.Post("/send-presence", func(c *fiber.Ctx) error {
@@ -267,7 +291,7 @@ func restServer(_ *cobra.Command, _ []string) {
 		}
 
 		if len(config.WhatsappWebhook) > 0 {
-			go func	() {
+			go func() {
 				payload := map[string]interface{}{
 					"SenderNumber": request.Phone,
 					"Call_Id":      request.CallID,
