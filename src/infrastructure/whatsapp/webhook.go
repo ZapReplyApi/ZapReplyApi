@@ -39,35 +39,48 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	waReaction := buildEventReaction(evt)
 	forwarded := buildForwarded(evt)
 
+	// Logar mensagem bruta para debug
+	logrus.Debugf("Raw message: %+v", evt.Message)
+
 	body := make(map[string]interface{})
 
 	if from := evt.Info.SourceString(); from != "" {
 		body["SenderNumber"] = from
 	}
 
-	// Adiciona informações da enquete, se for uma atualização de votação
-	if pollUpdate := evt.Message.GetPollUpdateMessage(); pollUpdate != nil {
-		// Log para depuração: capturar dados brutos do PollUpdateMessage
-		logrus.Debugf("PollUpdateMessage received: %+v", pollUpdate)
-		body["message"] = map[string]interface{}{
-			"ID":            evt.Info.ID,
-			"TextMessage":   message.Text,
-			"RepliedId":     message.RepliedId,
-			"MessageOrigin": message.QuotedMessage,
-			"PollUpdate": map[string]interface{}{
-				"PollID": pollUpdate.GetPollCreationMessageKey().GetID(),
-				// Placeholder: opções selecionadas não implementadas devido à falta de GetSelectedOptions
-				"SelectedOptions": []map[string]interface{}{},
-			},
+	messageData := make(map[string]interface{})
+	// Definir campos na ordem desejada
+	messageData["ID"] = message.ID
+	messageData["MessageOrigin"] = message.QuotedMessage
+	messageData["RepliedId"] = message.RepliedId
+
+	// Verificar se é uma mensagem com link (extendedTextMessage)
+	if extendedText := evt.Message.GetExtendedTextMessage(); extendedText != nil {
+		urlRegex := regexp.MustCompile(`https?://[^\s]+`)
+		if urlRegex.MatchString(extendedText.GetText()) {
+			if title := extendedText.GetTitle(); title != "" {
+				messageData["TitleLink"] = title
+			}
+			if description := extendedText.GetDescription(); description != "" {
+				messageData["LinkDescription"] = description
+			}
+			messageData["TextMessage"] = extendedText.GetText()
+		} else {
+			messageData["TextMessage"] = message.Text
 		}
 	} else {
-		body["message"] = map[string]interface{}{
-			"ID":            message.ID,
-			"TextMessage":   message.Text,
-			"RepliedId":     message.RepliedId,
-			"MessageOrigin": message.QuotedMessage,
+		messageData["TextMessage"] = message.Text
+	}
+
+	if pollUpdate := evt.Message.GetPollUpdateMessage(); pollUpdate != nil {
+		logrus.Debugf("PollUpdateMessage received: %+v", pollUpdate)
+		messageData["PollUpdate"] = map[string]interface{}{
+			"PollID": pollUpdate.GetPollCreationMessageKey().GetID(),
+			"SelectedOptions": []map[string]interface{}{},
 		}
 	}
+
+	body["message"] = messageData
 
 	if pushname := evt.Info.PushName; pushname != "" {
 		body["PushName"] = pushname
@@ -100,7 +113,6 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 		}
 	}
 
-	// Verifica se a mensagem é do próprio número
 	waCli := GetWaCli()
 	MyNumber := false
 	if waCli != nil && waCli.Store.ID != nil {
@@ -110,8 +122,40 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 
 	body["Type"] = determineMessageType(evt, message.Text)
 
-	// Adiciona a porta configurada no payload
 	body["Port"] = config.AppPort
+
+	if contactMessage := evt.Message.GetContactMessage(); contactMessage != nil {
+		logrus.Debugf("Single ContactMessage detected: %+v", contactMessage)
+		body["contact"] = []interface{}{
+			map[string]interface{}{
+				"displayName": contactMessage.GetDisplayName(),
+				"vcard":       contactMessage.GetVcard(),
+			},
+		}
+	}
+
+	if evt.Info.Type == "media" && strings.Contains(fmt.Sprintf("%+v", evt.Message), "contactsArrayMessage") {
+		logrus.Debugf("Multiple contacts message detected in media type: %+v", evt.Message)
+		rawMessage := fmt.Sprintf("%+v", evt.Message)
+		contacts := []interface{}{}
+		re := regexp.MustCompile(`contacts:{displayName:"(.*?)".*?vcard:"(.*?)"}`)
+		matches := re.FindAllStringSubmatch(rawMessage, -1)
+		logrus.Debugf("Regex matches found: %d", len(matches))
+		for i, match := range matches {
+			if len(match) == 3 {
+				vcard := strings.ReplaceAll(match[2], `\n`, "\n")
+				contacts = append(contacts, map[string]interface{}{
+					"displayName": match[1],
+					"vcard":       vcard,
+				})
+			} else {
+				logrus.Warnf("Invalid match at index %d: %v", i, match)
+			}
+		}
+		body["contact"] = contacts
+		body["Type"] = "contact_message"
+		logrus.Warnf("Extracted %d contacts from raw message data: %+v", len(contacts), contacts)
+	}
 
 	if audioMedia := evt.Message.GetAudioMessage(); audioMedia != nil {
 		path, err := ExtractMedia(ctx, config.PathMedia, audioMedia)
@@ -120,9 +164,6 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 			return nil, pkgError.WebhookError(fmt.Sprintf("Failed to download audio: %v", err))
 		}
 		body["audio"] = path
-	}
-	if contactMessage := evt.Message.GetContactMessage(); contactMessage != nil {
-		body["contact"] = contactMessage
 	}
 	if documentMessage := evt.Message.GetDocumentMessage(); documentMessage != nil {
 		path, err := ExtractMedia(ctx, config.PathMedia, documentMessage)
@@ -172,10 +213,7 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	return body, nil
 }
 
-// Função auxiliar para obter o título da opção da enquete
 func getPollOptionTitle(ctx context.Context, evt *events.Message, option []byte) string {
-	// Placeholder: Retorna o hash da opção como string.
-	// Para obter o título real, implemente lógica para consultar a mensagem original da enquete.
 	return fmt.Sprintf("Option_%x", option)
 }
 
@@ -184,31 +222,34 @@ func determineMessageType(evt *events.Message, text string) string {
 		if evt.Message.GetAudioMessage().GetPTT() {
 			return "voice_message"
 		}
-		return "audio"
+		return "audio_message"
 	}
 	if evt.Message.GetImageMessage() != nil {
-		return "image"
+		return "image_message"
 	}
 	if evt.Message.GetVideoMessage() != nil {
-		return "video"
+		return "video_message"
 	}
 	if evt.Message.GetDocumentMessage() != nil {
-		return "document"
+		return "document_message"
 	}
 	if evt.Message.GetStickerMessage() != nil {
-		return "sticker"
+		return "sticker_message"
 	}
 	if evt.Message.GetContactMessage() != nil {
-		return "contact"
+		return "contact_message"
+	}
+	if evt.Info.Type == "media" && strings.Contains(fmt.Sprintf("%+v", evt.Message), "contactsArrayMessage") {
+		return "contact_message"
 	}
 	if evt.Message.GetLocationMessage() != nil {
-		return "location"
+		return "location_message"
 	}
 	if evt.Message.GetLiveLocationMessage() != nil {
-		return "live_location"
+		return "live_location_message"
 	}
 	if evt.Message.GetListMessage() != nil {
-		return "list"
+		return "list_message"
 	}
 	if evt.Message.GetOrderMessage() != nil {
 		return "order"
@@ -217,20 +258,20 @@ func determineMessageType(evt *events.Message, text string) string {
 		return "payment"
 	}
 	if evt.Message.GetPollCreationMessageV3() != nil || evt.Message.GetPollCreationMessageV4() != nil || evt.Message.GetPollCreationMessageV5() != nil {
-		return "poll"
+		return "poll_message"
 	}
 	if evt.Message.GetPollUpdateMessage() != nil {
-		return "poll"
+		return "poll_message"
 	}
 	if evt.Message.GetReactionMessage() != nil {
-		return "reaction"
+		return "reaction_message"
 	}
 	if evt.Message.GetConversation() != "" || evt.Message.GetExtendedTextMessage() != nil {
 		urlRegex := regexp.MustCompile(`https?://[^\s]+`)
 		if urlRegex.MatchString(text) {
-			return "link"
+			return "link_message"
 		}
-		return "text"
+		return "text_message"
 	}
 	return "unknown"
 }
