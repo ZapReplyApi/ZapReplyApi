@@ -209,6 +209,14 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 		}
 		body["video"] = path
 	}
+	if ptvMedia := evt.Message.GetPtvMessage(); ptvMedia != nil {
+		path, err := ExtractMedia(ctx, config.PathMedia, ptvMedia)
+		if err != nil {
+			logrus.Errorf("Failed to download PTV video: %v", err)
+			return nil, pkgError.WebhookError(fmt.Sprintf("Failed to download PTV video: %v", err))
+		}
+		body["video"] = path
+	}
 
 	return body, nil
 }
@@ -218,6 +226,9 @@ func getPollOptionTitle(ctx context.Context, evt *events.Message, option []byte)
 }
 
 func determineMessageType(evt *events.Message, text string) string {
+	if evt.Message.GetPtvMessage() != nil {
+		return "video_snapshot_message"
+	}
 	if evt.Message.GetAudioMessage() != nil {
 		if evt.Message.GetAudioMessage().GetPTT() {
 			return "voice_message"
